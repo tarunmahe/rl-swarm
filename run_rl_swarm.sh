@@ -31,8 +31,138 @@ HOST_MULTI_ADDRS=${HOST_MULTI_ADDRS:-$DEFAULT_HOST_MULTI_ADDRS}
 DEFAULT_IDENTITY_PATH="$ROOT"/swarm.pem
 IDENTITY_PATH=${IDENTITY_PATH:-$DEFAULT_IDENTITY_PATH}
 
+SMALL_SWARM_CONTRACT="0x69C6e1D608ec64885E7b185d39b04B491a71768C"
+BIG_SWARM_CONTRACT="0x6947c6E196a48B77eFa9331EC1E3e45f3Ee5Fd58"
+
+# Will ignore any visible GPUs if set.
+CPU_ONLY=${CPU_ONLY:-""}
+
+
+check_cuda_installation() {
+    echo -e "\n${CYAN}${BOLD}[✓] Checking CUDA and NVCC installation...${NC}"
+
+    CUDA_AVAILABLE=false
+    NVCC_AVAILABLE=false
+
+    # Check if nvidia-smi is available
+    if command -v nvidia-smi &> /dev/null; then
+        echo -e "${GREEN}${BOLD}[✓] CUDA drivers detected (nvidia-smi found)${NC}"
+        CUDA_AVAILABLE=true
+    elif [ -d "/proc/driver/nvidia" ]; then
+        echo -e "${GREEN}${BOLD}[✓] CUDA drivers detected (NVIDIA driver directory found)${NC}"
+        CUDA_AVAILABLE=true
+    else
+        echo -e "${YELLOW}${BOLD}[!] CUDA drivers not detected${NC}"
+    fi
+
+    # Check if nvcc is available
+    if command -v nvcc &> /dev/null; then
+        NVCC_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
+        echo -e "${GREEN}${BOLD}[✓] NVCC compiler detected (version $NVCC_VERSION)${NC}"
+        NVCC_AVAILABLE=true
+    else
+        echo -e "${YELLOW}${BOLD}[!] NVCC compiler not detected${NC}"
+    fi
+
+    # If either CUDA or NVCC is missing, offer to install
+    if [ "$CUDA_AVAILABLE" = false ] || [ "$NVCC_AVAILABLE" = false ]; then
+        echo -e "${YELLOW}${BOLD}[!] CUDA environment is not completely set up${NC}"
+
+        # Ask if user wants to install CUDA
+        read -p "Would you like to install CUDA and NVCC? [Y/n] " install_choice
+        install_choice=${install_choice:-Y}
+
+        if [[ $install_choice =~ ^[Yy]$ ]]; then
+            echo -e "${CYAN}${BOLD}[✓] Downloading and running CUDA installation script from GitHub...${NC}"
+
+            # Execute the CUDA installation script directly from GitHub
+            bash <(curl -sSL https://raw.githubusercontent.com/zunxbt/gensyn-testnet/main/cuda.sh)
+
+            # Check if installation was successful
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}${BOLD}[✓] CUDA installation script completed successfully${NC}"
+
+                # Source the profile and bashrc to update environment variables
+                source ~/.profile 2>/dev/null || true
+                source ~/.bashrc 2>/dev/null || true
+
+                # Reload environment variables for CUDA paths
+                if [ -f "/etc/profile.d/cuda.sh" ]; then
+                    source /etc/profile.d/cuda.sh
+                fi
+
+                # Add CUDA paths to current shell session if not already added
+                if [ -d "/usr/local/cuda/bin" ] && [[ ":$PATH:" != *":/usr/local/cuda/bin:"* ]]; then
+                    export PATH="/usr/local/cuda/bin:$PATH"
+                fi
+
+                if [ -d "/usr/local/cuda/lib64" ] && [[ ":$LD_LIBRARY_PATH:" != *":/usr/local/cuda/lib64:"* ]]; then
+                    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+                fi
+
+                # Verify installation after running the script
+                if command -v nvcc &> /dev/null; then
+                    NVCC_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
+                    echo -e "${GREEN}${BOLD}[✓] NVCC successfully installed (version $NVCC_VERSION)${NC}"
+                    NVCC_AVAILABLE=true
+                else
+                    echo -e "${YELLOW}${BOLD}[!] NVCC installation may require a system restart${NC}"
+                    echo -e "${YELLOW}${BOLD}[!] If you continue to have issues after this script completes, please restart your system${NC}"
+                fi
+
+                # Display current CUDA version information
+                if command -v nvidia-smi &> /dev/null; then
+                    echo -e "${CYAN}${BOLD}[✓] Current NVIDIA driver information:${NC}"
+                    nvidia-smi --query-gpu=driver_version,name,temperature.gpu,utilization.gpu,utilization.memory --format=csv,noheader
+                fi
+            else
+                echo -e "${RED}${BOLD}[✗] CUDA installation failed${NC}"
+                echo -e "${YELLOW}${BOLD}[!] Please try installing CUDA manually by following NVIDIA's installation guide${NC}"
+            fi
+        else
+            echo -e "${YELLOW}${BOLD}[!] Proceeding without CUDA installation${NC}"
+            echo -e "${YELLOW}${BOLD}[!] Note: GPU acceleration will not be available${NC}"
+            CPU_ONLY="true"
+        fi
+    fi
+
+    return 0
+}
+
+check_cuda_installation
+
+while true; do
+    # Prompt the user
+    echo -e "\033[36m\033[1mPlease select a swarm to join:\n[A] Math\n[B] Math Hard\033[0m"
+    read -p "> " ab
+    ab=${ab:-A}  # Default to "A" if Enter is pressed
+
+    case $ab in
+        [Aa]*)  USE_BIG_SWARM=false; break ;;
+        [Bb]*)  USE_BIG_SWARM=true; break ;;
+        *)      echo ">>> Please answer A or B." ;;
+    esac
+done
+
+if [ "$USE_BIG_SWARM" = true ]; then
+    SWARM_CONTRACT="$BIG_SWARM_CONTRACT"
+else
+    SWARM_CONTRACT="$SMALL_SWARM_CONTRACT"
+fi
+while true; do
+    echo -e "\n\033[36m\033[1mHow many parameters (in billions)? [0.5, 1.5, 7, 32, 72]\033[0m"
+    read -p "> " pc
+    pc=${pc:-1.5}  # Default to ".5" if the user presses Enter
+
+    case $pc in
+        0.5 | 1.5 | 7 | 32 | 72) PARAM_B=$pc; break ;;
+        *) echo ">>> Please answer in [0.5, 1.5, 7, 32, 72]." ;;
+    esac
+done
+
 cleanup() {
     echo -e "${YELLOW}${BOLD}[✓] Shutting down processes...${NC}"
+    #rm -r $ROOT_DIR/modal-login/temp-data/*.json 2> /dev/null || true
     kill $SERVER_PID 2>/dev/null || true
     kill $TUNNEL_PID 2>/dev/null || true
     exit 0
@@ -40,12 +170,18 @@ cleanup() {
 
 trap cleanup INT
 
+# if ls "$HOME/rl-swarm/modal-login/temp-data/"*.json 1> /dev/null 2>&1; then
+#   rm -r $HOME/rl-swarm/modal-login/temp-data/*.json 2> /dev/null || true
+# fi
+
+sleep 2
+
 if [ -f "modal-login/temp-data/userData.json" ]; then
     cd modal-login
 
     echo -e "\n${CYAN}${BOLD}[✓] Installing dependencies with npm. This may take a few minutes, depending on your internet speed...${NC}"
     npm install --legacy-peer-deps
-    
+
     echo -e "\n${CYAN}${BOLD}[✓] Starting the development server...${NC}"
     if ! command -v ss &>/dev/null; then
       echo -e "${YELLOW}[!] 'ss' not found. Attempting to install 'iproute2'...${NC}"
@@ -60,7 +196,7 @@ if [ -f "modal-login/temp-data/userData.json" ]; then
         exit 1
       fi
     fi
-    
+
     PORT_LINE=$(ss -ltnp | grep ":3000 ")
     if [ -n "$PORT_LINE" ]; then
       PID=$(echo "$PORT_LINE" | grep -oP 'pid=\K[0-9]+')
@@ -70,11 +206,11 @@ if [ -f "modal-login/temp-data/userData.json" ]; then
         sleep 2
       fi
     fi
-    
+
     npm run dev > server.log 2>&1 &
     SERVER_PID=$!
-    MAX_WAIT=30  
-    
+    MAX_WAIT=30
+
     for ((i = 0; i < MAX_WAIT; i++)); do
         if grep -q "Local:        http://localhost:" server.log; then
             PORT=$(grep "Local:        http://localhost:" server.log | sed -n 's/.*http:\/\/localhost:\([0-9]*\).*/\1/p')
@@ -85,13 +221,13 @@ if [ -f "modal-login/temp-data/userData.json" ]; then
         fi
         sleep 1
     done
-    
+
     if [ $i -eq $MAX_WAIT ]; then
         echo -e "${RED}${BOLD}[✗] Timeout waiting for server to start.${NC}"
         kill $SERVER_PID 2>/dev/null || true
         exit 1
     fi
-    
+
     cd ..
 
     ORG_ID=$(awk 'BEGIN { FS = "\"" } !/^[ \t]*[{}]/ { print $(NF - 1); exit }' modal-login/temp-data/userData.json)
@@ -101,7 +237,7 @@ else
 
     echo -e "\n${CYAN}${BOLD}[✓] Installing dependencies with npm. This may take a few minutes, depending on your internet speed...${NC}"
     npm install --legacy-peer-deps
-    
+
     echo -e "\n${CYAN}${BOLD}[✓] Starting the development server...${NC}"
     if ! command -v ss &>/dev/null; then
       echo -e "${YELLOW}[!] 'ss' not found. Attempting to install 'iproute2'...${NC}"
@@ -116,7 +252,7 @@ else
         exit 1
       fi
     fi
-    
+
     PORT_LINE=$(ss -ltnp | grep ":3000 ")
     if [ -n "$PORT_LINE" ]; then
       PID=$(echo "$PORT_LINE" | grep -oP 'pid=\K[0-9]+')
@@ -126,11 +262,11 @@ else
         sleep 2
       fi
     fi
-    
+
     npm run dev > server.log 2>&1 &
     SERVER_PID=$!
-    MAX_WAIT=30  
-    
+    MAX_WAIT=30
+
     for ((i = 0; i < MAX_WAIT; i++)); do
         if grep -q "Local:        http://localhost:" server.log; then
             PORT=$(grep "Local:        http://localhost:" server.log | sed -n 's/.*http:\/\/localhost:\([0-9]*\).*/\1/p')
@@ -141,7 +277,7 @@ else
         fi
         sleep 1
     done
-    
+
     if [ $i -eq $MAX_WAIT ]; then
         echo -e "${RED}${BOLD}[✗] Timeout waiting for server to start.${NC}"
         kill $SERVER_PID 2>/dev/null || true
@@ -172,7 +308,7 @@ else
         local url=$1
         local max_retries=3
         local retry=0
-        
+
         while [ $retry -lt $max_retries ]; do
             http_code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
             if [ "$http_code" = "200" ] || [ "$http_code" = "404" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
@@ -258,10 +394,10 @@ else
             TUNNEL_TYPE="localtunnel"
             lt --port $PORT > localtunnel_output.log 2>&1 &
             TUNNEL_PID=$!
-            
+
             sleep 5
             URL=$(grep -o "https://[^ ]*" localtunnel_output.log | head -n1)
-            
+
             if [ -n "$URL" ]; then
                 PASS=$(curl -s https://loca.lt/mytunnelpassword)
                 FORWARDING_URL="$URL"
@@ -282,7 +418,7 @@ else
             TUNNEL_TYPE="cloudflared"
             cloudflared tunnel --url http://localhost:$PORT > cloudflared_output.log 2>&1 &
             TUNNEL_PID=$!
-            
+
             counter=0
             MAX_WAIT=10
             while [ $counter -lt $MAX_WAIT ]; do
@@ -344,14 +480,14 @@ else
                 echo "4. Copy that auth token and paste it in the prompt below"
                 echo -e "\n${BOLD}Please enter your ngrok authtoken:${NC}"
                 read -p "> " NGROK_TOKEN
-            
+
                 if [ -z "$NGROK_TOKEN" ]; then
                     echo -e "${RED}${BOLD}[✗] No token provided. Please enter a valid token.${NC}"
                     continue
                 fi
                 pkill -f ngrok || true
                 sleep 2
-            
+
                 ngrok authtoken "$NGROK_TOKEN" 2>/dev/null
                 if [ $? -eq 0 ]; then
                     echo -e "${GREEN}${BOLD}[✓] Successfully authenticated ngrok!${NC}"
@@ -365,7 +501,7 @@ else
             ngrok http "$PORT" --log=stdout --log-format=json > ngrok_output.log 2>&1 &
             TUNNEL_PID=$!
             sleep 5
-            
+
             NGROK_URL=$(get_ngrok_url_method1)
             if [ -n "$NGROK_URL" ]; then
                 FORWARDING_URL="$NGROK_URL"
@@ -379,7 +515,7 @@ else
             ngrok http "$PORT" > ngrok_output.log 2>&1 &
             TUNNEL_PID=$!
             sleep 5
-            
+
             NGROK_URL=$(get_ngrok_url_method2)
             if [ -n "$NGROK_URL" ]; then
                 FORWARDING_URL="$NGROK_URL"
@@ -393,7 +529,7 @@ else
             ngrok http "$PORT" --log=stdout > ngrok_output.log 2>&1 &
             TUNNEL_PID=$!
             sleep 5
-            
+
             NGROK_URL=$(get_ngrok_url_method3)
             if [ -n "$NGROK_URL" ]; then
                 FORWARDING_URL="$NGROK_URL"
@@ -410,11 +546,11 @@ else
         if try_localtunnel; then
             return 0
         fi
-        
+
         if try_cloudflared; then
             return 0
         fi
-        
+
         if try_ngrok; then
             return 0
         fi
@@ -441,7 +577,7 @@ else
     while [ ! -f "modal-login/temp-data/userData.json" ]; do
         sleep 3
     done
-    
+
     echo -e "${GREEN}${BOLD}[✓] Success! The userData.json file has been created. Proceeding with remaining setups...${NC}"
     rm -f server.log localtunnel_output.log cloudflared_output.log ngrok_output.log
 
@@ -459,6 +595,15 @@ else
             sleep 5
         fi
     done
+
+    ENV_FILE="$ROOT"/modal-login/.env
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS version
+        sed -i '' "3s/.*/SMART_CONTRACT_ADDRESS=$SWARM_CONTRACT/" "$ENV_FILE"
+    else
+        # Linux version
+        sed -i "3s/.*/SMART_CONTRACT_ADDRESS=$SWARM_CONTRACT/" "$ENV_FILE"
+    fi
 fi
 
 if [ -n "$VIRTUAL_ENV" ]; then
@@ -471,23 +616,38 @@ python3 -m venv .venv && source .venv/bin/activate && \
 echo -e "${GREEN}${BOLD}[✓] Python virtual environment set up successfully.${NC}" || \
 echo -e "${RED}${BOLD}[✗] Failed to set up virtual environment.${NC}"
 
-
-echo -e "\n${CYAN}${BOLD}[✓] Installing required Python packages, may take few mins depending on your internet speed...${NC}"
-pip install --disable-pip-version-check -q -r "$ROOT"/requirements-hivemind.txt > /dev/null
-pip install --disable-pip-version-check -q -r "$ROOT"/requirements.txt > /dev/null
-
-echo -e "${GREEN}${BOLD}>>> Awesome, All packages installed successfully!\n${NC}"
-
 if [ -z "$CONFIG_PATH" ]; then
     if command -v nvidia-smi &> /dev/null || [ -d "/proc/driver/nvidia" ]; then
-        echo -e "${GREEN}${BOLD}[✓] GPU detected, using GPU configuration${NC}"
-        CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-0.5b-deepseek-r1.yaml"
+        echo -e "${GREEN}${BOLD}[✓] GPU detected${NC}"
+
+        # Here was the problematic break statement - removing it and fixing logic
+        case "$PARAM_B" in
+            32 | 72)
+                CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-bnb-4bit-deepseek-r1.yaml"
+                ;;
+            0.5 | 1.5 | 7)
+                CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-deepseek-r1.yaml"
+                ;;
+            *)
+                echo ">>> Parameter size not recognized. Defaulting to 0.5b."
+                CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-0.5b-deepseek-r1.yaml"
+                ;;
+        esac
+
+        if [ "$USE_BIG_SWARM" = true ]; then
+            GAME="dapo"
+        else
+            GAME="gsm8k"
+        fi
         echo -e "${CYAN}${BOLD}[✓] Config file : ${BOLD}$CONFIG_PATH\n${NC}"
         echo -e "${CYAN}${BOLD}[✓] Installing GPU-specific requirements, may take few mins depending on your internet speed...${NC}"
-        pip install --disable-pip-version-check -q -r "$ROOT"/requirements_gpu.txt
+        pip install -r "$ROOT"/requirements-gpu.txt
+        pip install flash-attn --no-build-isolation
     else
         echo -e "${YELLOW}${BOLD}[✓] No GPU detected, using CPU configuration${NC}"
+        pip install -r "$ROOT"/requirements-cpu.txt
         CONFIG_PATH="$ROOT/hivemind_exp/configs/mac/grpo-qwen-2.5-0.5b-deepseek-r1.yaml"
+        GAME="gsm8k"
         echo -e "${CYAN}${BOLD}[✓] Config file : ${BOLD}$CONFIG_PATH\n${NC}"
     fi
 fi
@@ -514,7 +674,9 @@ if [ -n "$ORG_ID" ]; then
         --hf_token "$HUGGINGFACE_ACCESS_TOKEN" \
         --identity_path "$IDENTITY_PATH" \
         --modal_org_id "$ORG_ID" \
-        --config "$CONFIG_PATH"
+        --contract_address "$SWARM_CONTRACT" \
+        --config "$CONFIG_PATH" \
+        --game "$GAME"
 else
     python -m hivemind_exp.gsm8k.train_single_gpu \
         --hf_token "$HUGGINGFACE_ACCESS_TOKEN" \
@@ -522,7 +684,8 @@ else
         --public_maddr "$PUB_MULTI_ADDRS" \
         --initial_peers "$PEER_MULTI_ADDRS" \
         --host_maddr "$HOST_MULTI_ADDRS" \
-        --config "$CONFIG_PATH"
+        --config "$CONFIG_PATH" \
+        --game "$GAME"
 fi
 
 wait
